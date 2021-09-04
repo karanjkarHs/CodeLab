@@ -1,0 +1,110 @@
+---
+# Description: Refresh db 
+# Author: Harshad S Karanjkar
+  - name: database refresh using replica/standby database
+    hosts: targetHost
+    vars: 
+      user_name: root
+      user_password: !vault |
+                $ANSIBLE_VAULT;1.1;AES256
+                30376634366535383637623437343234323239653233343639636431336433373266623035313231
+                6661616363353563613463643632653162346362633739620a383833616263393036363865616237
+                62366239636561623934333664383338636439313430643464356238346336633364343935616634
+                3465376262323861320a616530326262366338643364326136303533633261323861376466323562
+                3865
+      source_socket_path: /--path--/mysql.sock
+      target_socket_path: /--path--/mysql.sock
+      db1backup_path : /--path--/db1.sql
+      db2backup_path : /--path--/db2.sql
+      data_uplaod_script_path: /--path--/data_update.sql
+      destination_file_path : /tmp/
+    tasks: 
+      - name: verify_SLAVE_IO_RUNNING
+        shell: mysql -u{{ user_name }} -p{{ user_password }} -S{{ source_socket_path }} --execute="SELECT SERVICE_STATE FROM performance_schema.replication_connection_status"
+        register: result
+        delegate_to: localhost
+      - debug: 
+            var: result.stdout_lines  
+      - name: End play if SLAVE_IO_RUNNING is OFF
+        meta: end_play  
+        when: "'OFF' in result.stdout_lines"
+        delegate_to: localhost
+      - name: verify_SLAVE_SQL_RUNNING
+        shell: mysql -u{{ user_name }} -p{{ user_password }} -S{{ source_socket_path }} --execute="SELECT SERVICE_STATE FROM performance_schema.replication_applier_status"
+        register: result
+        delegate_to: localhost
+      - debug: 
+            var: result.stdout_lines   
+      - name: End play if SLAVE_SQL_RUNNING is OFF.
+        meta: end_play  
+        when: "'OFF' in result.stdout_lines"
+        delegate_to: localhost
+      - name: source_backup_portaldb
+        mysql_db:
+          login_unix_socket: '{{ source_socket_path }}'
+          login_user: '{{ user_name }}'
+          login_password: '{{ user_password }}'
+          state: dump
+          name: portalDB
+          target: '{{ db1backup_path }}'
+        delegate_to: localhost
+      - name: source_backup_workingdb
+        mysql_db:
+          login_unix_socket: '{{ source_socket_path }}'
+          login_user: '{{ user_name }}'
+          login_password: '{{ user_password }}'
+          state: dump
+          name: workingDB
+          target: '{{ db2backup_path }}'
+        delegate_to: localhost
+      - name: copy_files_to_target
+        copy:
+          src: '{{ item }}'    
+          dest: '{{ destination_file_path }}'
+          owner: iuxu
+          group: iuxu
+          mode: 0644
+        with_items:
+          - "{{ db1backup_path }}"  
+          - "{{ db2backup_path }}" 
+          - "{{ data_uplaod_script_path }}"       
+      - name: target_restore_portaldb
+        mysql_db:
+          login_unix_socket: '{{ target_socket_path }}'
+          login_user: '{{ user_name }}'
+          login_password: '{{ user_password }}'
+          state: import
+          name: portalDB
+          target: '{{ db1backup_path }}'          
+      - name: target_restore_workingdb
+        mysql_db:
+          login_unix_socket: '{{ target_socket_path }}'
+          login_user: '{{ user_name }}'
+          login_password: '{{ user_password }}'
+          state: import
+          name: workingDB
+          target: '{{ db2backup_path }}'      
+      - name: run_data_scrubbing_script   
+        mysql_db:  
+          login_unix_socket: '{{ target_socket_path }}'
+          login_user: '{{ user_name }}'
+          login_password: '{{ user_password }}'
+          name: portalDB
+          state: import
+          target: '{{ data_uplaod_script_path }}'   
+      - name: cleanup_target_backup_files
+        file:
+          path: "{{ item }}"
+          state: absent
+        with_items:
+          - "{{ '/'.join(({{ destination_file_path }}, 'portaldb.sql' )) }}"
+          - "{{ '/'.join(({{ destination_file_path }}, 'workingdb.sql' )) }}"
+          - "{{ '/'.join(({{ destination_file_path }}, 'target_data_update.sql' )) }}"
+      - name: cleanup_local_backup_files
+        file:
+          path: "{{ item }}"
+          state: absent
+        with_items:
+          - '{{ db1backup_path }}'
+          - '{{ db2backup_path }}'
+        delegate_to: localhost                       
